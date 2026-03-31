@@ -18,6 +18,7 @@ import (
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
@@ -150,6 +151,14 @@ func runMainServer() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 	defer app.Cleanup()
+
+	// Start Claude CLI version syncer (checks npm every 6 hours for updates)
+	versionSyncer := claude.NewVersionSyncer(6 * time.Hour)
+	versionSyncer.SetOnChange(func(cliVersion, sdkVersion string) {
+		log.Printf("Claude CLI version updated: cli=%s sdk=%s", cliVersion, sdkVersion)
+	})
+	versionSyncer.Start()
+	defer versionSyncer.Stop()
 
 	// 启动服务器
 	go func() {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -26,15 +27,19 @@ var (
 )
 
 // 默认指纹值（当客户端未提供时使用）
-// Synced with Claude Code 2.1.88 / @anthropic-ai/sdk 0.74.0
-var defaultFingerprint = Fingerprint{
-	UserAgent:               "claude-cli/2.1.88 (external, cli)",
-	StainlessLang:           "js",
-	StainlessPackageVersion: "0.74.0",
-	StainlessOS:             "Linux",
-	StainlessArch:           "arm64",
-	StainlessRuntime:        "node",
-	StainlessRuntimeVersion: "v22.14.0",
+// 现在通过 getDefaultFingerprint() 动态生成，使用 claude.GetCurrent*() 函数获取最新版本
+// Synced dynamically via VersionSyncer
+
+func getDefaultFingerprint() Fingerprint {
+	return Fingerprint{
+		UserAgent:               claude.GetCurrentUserAgent(),
+		StainlessLang:           "js",
+		StainlessPackageVersion: claude.GetCurrentSDKVersion(),
+		StainlessOS:             "Linux",
+		StainlessArch:           "arm64",
+		StainlessRuntime:        "node",
+		StainlessRuntimeVersion: claude.GetCurrentNodeVersion(),
+	}
 }
 
 // stainlessProfile 定义一组环境指纹参数
@@ -45,16 +50,31 @@ type stainlessProfile struct {
 // stainlessProfiles 预定义的多样化环境指纹池。
 // 首次创建指纹时从中随机选择，之后通过缓存机制（7天TTL）保持稳定。
 // 这避免了所有账号共享同一组 OS/Arch/RuntimeVersion 被统计识别。
-// 注意: 所有 RuntimeVersion 统一使用与 DefaultHeaders 一致的 Node LTS 版本，
-// 因为 Claude Code 用户大多使用类似版本的 Node.js。
+// 包含真实 Claude Code 用户常见的 OS/Arch/Node.js 版本组合。
 var stainlessProfiles = []stainlessProfile{
+	// Linux x64 (most common server/dev environment)
 	{"Linux", "x64", "v22.14.0"},
-	{"Linux", "arm64", "v22.14.0"},
-	{"Darwin", "arm64", "v22.14.0"},
-	{"Darwin", "x64", "v22.14.0"},
-	{"Windows_NT", "x64", "v22.14.0"},
+	{"Linux", "x64", "v22.13.1"},
 	{"Linux", "x64", "v22.12.0"},
+	{"Linux", "x64", "v20.18.1"},
+	{"Linux", "x64", "v20.17.0"},
+	// Linux arm64 (ARM servers, Graviton instances)
+	{"Linux", "arm64", "v22.14.0"},
+	{"Linux", "arm64", "v22.13.1"},
+	{"Linux", "arm64", "v22.12.0"},
+	// macOS arm64 (Apple Silicon - very common for developers)
+	{"Darwin", "arm64", "v22.14.0"},
+	{"Darwin", "arm64", "v22.13.1"},
 	{"Darwin", "arm64", "v22.12.0"},
+	{"Darwin", "arm64", "v20.18.1"},
+	// macOS x64 (older Intel Macs)
+	{"Darwin", "x64", "v22.14.0"},
+	{"Darwin", "x64", "v22.12.0"},
+	// Windows (developer workstations)
+	{"Windows_NT", "x64", "v22.14.0"},
+	{"Windows_NT", "x64", "v22.13.1"},
+	{"Windows_NT", "x64", "v22.12.0"},
+	{"Windows_NT", "x64", "v20.18.1"},
 }
 
 // Fingerprint represents account fingerprint data
@@ -144,18 +164,19 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 // 当客户端未提供 stainless headers 时，从预定义多样化池中随机选择环境参数
 func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fingerprint {
 	fp := &Fingerprint{}
+	defaults := getDefaultFingerprint()
 
 	// 获取User-Agent
 	if ua := headers.Get("User-Agent"); ua != "" {
 		fp.UserAgent = ua
 	} else {
-		fp.UserAgent = defaultFingerprint.UserAgent
+		fp.UserAgent = defaults.UserAgent
 	}
 
 	// 获取x-stainless-*头
-	fp.StainlessLang = getHeaderOrDefault(headers, "X-Stainless-Lang", defaultFingerprint.StainlessLang)
-	fp.StainlessPackageVersion = getHeaderOrDefault(headers, "X-Stainless-Package-Version", defaultFingerprint.StainlessPackageVersion)
-	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", defaultFingerprint.StainlessRuntime)
+	fp.StainlessLang = getHeaderOrDefault(headers, "X-Stainless-Lang", defaults.StainlessLang)
+	fp.StainlessPackageVersion = getHeaderOrDefault(headers, "X-Stainless-Package-Version", defaults.StainlessPackageVersion)
+	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", defaults.StainlessRuntime)
 
 	// 对 OS/Arch/RuntimeVersion：如果客户端未提供，从多样化池中随机选择
 	// 这样不同账号会拥有不同的环境指纹，避免统计异常
@@ -165,8 +186,8 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fin
 
 	if clientOS != "" {
 		fp.StainlessOS = clientOS
-		fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", defaultFingerprint.StainlessArch)
-		fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaultFingerprint.StainlessRuntimeVersion)
+		fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", defaults.StainlessArch)
+		fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaults.StainlessRuntimeVersion)
 	} else {
 		// 客户端未提供，从池中随机选择
 		profile := randomStainlessProfile()

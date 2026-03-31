@@ -1,0 +1,77 @@
+package service
+
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
+
+// RequestPacer adds small random delays between rapid consecutive requests
+// to the same account, making the request pattern more realistic.
+// Real Claude Code users have variable think-time between requests.
+//
+// This is NOT a rate limiter — it's a pattern normalizer. It only adds delay
+// when requests come faster than minInterval (suggesting automated usage).
+type RequestPacer struct {
+	mu          sync.Mutex
+	lastRequest map[int64]time.Time // accountID -> last request time
+	rng         *rand.Rand
+
+	// minInterval is the minimum time between requests before pacing kicks in.
+	// Requests slower than this pass through without delay.
+	minInterval time.Duration
+
+	// maxJitter is the maximum random delay added when pacing is needed.
+	maxJitter time.Duration
+}
+
+// NewRequestPacer creates a new RequestPacer.
+// minInterval: requests faster than this get paced (recommended: 1-2s)
+// maxJitter: maximum random delay added (recommended: 2-4s)
+func NewRequestPacer(minInterval, maxJitter time.Duration) *RequestPacer {
+	return &RequestPacer{
+		lastRequest: make(map[int64]time.Time, 64),
+		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		minInterval: minInterval,
+		maxJitter:   maxJitter,
+	}
+}
+
+// GetDelay returns the delay that should be applied before sending the request.
+// Returns 0 if no pacing is needed.
+func (p *RequestPacer) GetDelay(accountID int64) time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	last, exists := p.lastRequest[accountID]
+	p.lastRequest[accountID] = now
+
+	if !exists {
+		return 0
+	}
+
+	elapsed := now.Sub(last)
+	if elapsed >= p.minInterval {
+		return 0 // Enough time has passed, no pacing needed
+	}
+
+	// Add random jitter: minInterval - elapsed + random(0, maxJitter)
+	remaining := p.minInterval - elapsed
+	jitter := time.Duration(p.rng.Int63n(int64(p.maxJitter)))
+	return remaining + jitter
+}
+
+// Cleanup removes stale entries older than maxAge.
+// Should be called periodically (e.g., every 5 minutes).
+func (p *RequestPacer) Cleanup(maxAge time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	for id, t := range p.lastRequest {
+		if t.Before(cutoff) {
+			delete(p.lastRequest, id)
+		}
+	}
+}

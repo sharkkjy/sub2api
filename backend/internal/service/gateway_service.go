@@ -570,6 +570,7 @@ type GatewayService struct {
 	debugClaudeMimic      atomic.Bool
 	debugGatewayBodyFile  atomic.Pointer[os.File] // non-nil when SUB2API_DEBUG_GATEWAY_BODY is set
 	tlsFPProfileService   *TLSFingerprintProfileService
+	requestPacer          *RequestPacer // 请求节流器，使请求模式更接近真实用户
 }
 
 // NewGatewayService creates a new GatewayService
@@ -629,6 +630,7 @@ func NewGatewayService(
 		modelsListCacheTTL:   modelsListTTL,
 		responseHeaderFilter: compileResponseHeaderFilter(cfg),
 		tlsFPProfileService:  tlsFPProfileService,
+		requestPacer:         NewRequestPacer(2*time.Second, 3*time.Second),
 	}
 	svc.userGroupRateResolver = newUserGroupRateResolver(
 		userGroupRateRepo,
@@ -4164,6 +4166,17 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			body = injectClaudeCodePrompt(body, parsed.System)
 		}
 
+		// 注入 x-anthropic-billing-header 到 system prompt（仅当 body 中尚无 billing header 时）
+		// 真实 Claude Code 客户端在每个请求的 system prompt 第一个 block 中包含此归因信息。
+		// 使用指纹中的版本号（或默认版本）来计算 billing fingerprint。
+		if !systemHasBillingHeader(body) {
+			billingVersion := ExtractCLIVersion(claude.GetCurrentUserAgent())
+			if billingVersion == "" {
+				billingVersion = claude.GetCurrentCLIVersion()
+			}
+			body = injectBillingHeader(body, billingVersion)
+		}
+
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: true}
 		if s.identityService != nil {
 			fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)
@@ -4235,6 +4248,19 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 重试间复用同一请求体，避免每次 string(body) 产生额外分配。
 	setOpsUpstreamRequestBody(c, body)
+
+	// 请求节流：对 OAuth mimic 请求应用微小延迟，使请求模式更接近真实用户行为
+	if shouldMimicClaudeCode && s.requestPacer != nil {
+		if delay := s.requestPacer.GetDelay(account.ID); delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
+		}
+	}
 
 	// 重试循环
 	var resp *http.Response
@@ -5938,7 +5964,8 @@ func applyClaudeOAuthHeaderDefaults(req *http.Request) {
 	if getHeaderRaw(req.Header, "Accept") == "" {
 		setHeaderRaw(req.Header, "Accept", "application/json")
 	}
-	for key, value := range claude.DefaultHeaders {
+	// Use dynamic headers (auto-updated by version syncer) instead of static DefaultHeaders
+	for key, value := range claude.GetCurrentDefaultHeaders() {
 		if value == "" {
 			continue
 		}
@@ -6243,7 +6270,8 @@ func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
 	applyClaudeOAuthHeaderDefaults(req)
 	// Then force key headers to match Claude Code fingerprint regardless of what the client sent.
 	// 使用 resolveWireCasing 确保 key 与真实 wire format 一致（如 "x-app" 而非 "X-App"）
-	for key, value := range claude.DefaultHeaders {
+	// Use dynamic headers (auto-updated by version syncer) instead of static DefaultHeaders
+	for key, value := range claude.GetCurrentDefaultHeaders() {
 		if value == "" {
 			continue
 		}
