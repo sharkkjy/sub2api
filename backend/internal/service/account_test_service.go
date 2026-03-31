@@ -127,7 +127,7 @@ func generateSessionString() (string, error) {
 	}
 	hex64 := hex.EncodeToString(b)
 	sessionUUID := uuid.New().String()
-	uaVersion := ExtractCLIVersion(claude.DefaultHeaders["User-Agent"])
+	uaVersion := ExtractCLIVersion(claude.GetCurrentUserAgent())
 	return FormatMetadataUserID(hex64, "", sessionUUID, uaVersion), nil
 }
 
@@ -284,8 +284,8 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// Apply Claude Code client headers
-	for key, value := range claude.DefaultHeaders {
+	// Apply Claude Code client headers (using dynamic versions)
+	for key, value := range claude.GetCurrentDefaultHeaders() {
 		req.Header.Set(key, value)
 	}
 
