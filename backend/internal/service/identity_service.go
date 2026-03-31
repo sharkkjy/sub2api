@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -25,14 +26,35 @@ var (
 )
 
 // 默认指纹值（当客户端未提供时使用）
+// Synced with Claude Code 2.1.88 / @anthropic-ai/sdk 0.74.0
 var defaultFingerprint = Fingerprint{
-	UserAgent:               "claude-cli/2.1.22 (external, cli)",
+	UserAgent:               "claude-cli/2.1.88 (external, cli)",
 	StainlessLang:           "js",
-	StainlessPackageVersion: "0.70.0",
+	StainlessPackageVersion: "0.74.0",
 	StainlessOS:             "Linux",
 	StainlessArch:           "arm64",
 	StainlessRuntime:        "node",
-	StainlessRuntimeVersion: "v24.13.0",
+	StainlessRuntimeVersion: "v22.14.0",
+}
+
+// stainlessProfile 定义一组环境指纹参数
+type stainlessProfile struct {
+	OS, Arch, RuntimeVersion string
+}
+
+// stainlessProfiles 预定义的多样化环境指纹池。
+// 首次创建指纹时从中随机选择，之后通过缓存机制（7天TTL）保持稳定。
+// 这避免了所有账号共享同一组 OS/Arch/RuntimeVersion 被统计识别。
+// 注意: 所有 RuntimeVersion 统一使用与 DefaultHeaders 一致的 Node LTS 版本，
+// 因为 Claude Code 用户大多使用类似版本的 Node.js。
+var stainlessProfiles = []stainlessProfile{
+	{"Linux", "x64", "v22.14.0"},
+	{"Linux", "arm64", "v22.14.0"},
+	{"Darwin", "arm64", "v22.14.0"},
+	{"Darwin", "x64", "v22.14.0"},
+	{"Windows_NT", "x64", "v22.14.0"},
+	{"Linux", "x64", "v22.12.0"},
+	{"Darwin", "arm64", "v22.12.0"},
 }
 
 // Fingerprint represents account fingerprint data
@@ -119,6 +141,7 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 }
 
 // createFingerprintFromHeaders 从请求头创建指纹
+// 当客户端未提供 stainless headers 时，从预定义多样化池中随机选择环境参数
 func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fingerprint {
 	fp := &Fingerprint{}
 
@@ -129,15 +152,47 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fin
 		fp.UserAgent = defaultFingerprint.UserAgent
 	}
 
-	// 获取x-stainless-*头，如果没有则使用默认值
+	// 获取x-stainless-*头
 	fp.StainlessLang = getHeaderOrDefault(headers, "X-Stainless-Lang", defaultFingerprint.StainlessLang)
 	fp.StainlessPackageVersion = getHeaderOrDefault(headers, "X-Stainless-Package-Version", defaultFingerprint.StainlessPackageVersion)
-	fp.StainlessOS = getHeaderOrDefault(headers, "X-Stainless-OS", defaultFingerprint.StainlessOS)
-	fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", defaultFingerprint.StainlessArch)
 	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", defaultFingerprint.StainlessRuntime)
-	fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaultFingerprint.StainlessRuntimeVersion)
+
+	// 对 OS/Arch/RuntimeVersion：如果客户端未提供，从多样化池中随机选择
+	// 这样不同账号会拥有不同的环境指纹，避免统计异常
+	clientOS := headers.Get("X-Stainless-OS")
+	clientArch := headers.Get("X-Stainless-Arch")
+	clientRuntimeVer := headers.Get("X-Stainless-Runtime-Version")
+
+	if clientOS != "" {
+		fp.StainlessOS = clientOS
+		fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", defaultFingerprint.StainlessArch)
+		fp.StainlessRuntimeVersion = getHeaderOrDefault(headers, "X-Stainless-Runtime-Version", defaultFingerprint.StainlessRuntimeVersion)
+	} else {
+		// 客户端未提供，从池中随机选择
+		profile := randomStainlessProfile()
+		fp.StainlessOS = profile.OS
+		if clientArch != "" {
+			fp.StainlessArch = clientArch
+		} else {
+			fp.StainlessArch = profile.Arch
+		}
+		if clientRuntimeVer != "" {
+			fp.StainlessRuntimeVersion = clientRuntimeVer
+		} else {
+			fp.StainlessRuntimeVersion = profile.RuntimeVersion
+		}
+	}
 
 	return fp
+}
+
+// randomStainlessProfile 从多样化池中随机选择一组环境参数
+func randomStainlessProfile() stainlessProfile {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(stainlessProfiles))))
+	if err != nil {
+		return stainlessProfiles[0] // fallback
+	}
+	return stainlessProfiles[n.Int64()]
 }
 
 // mergeHeadersIntoFingerprint 将请求头中实际存在的字段合并到现有指纹中（用于版本升级场景）

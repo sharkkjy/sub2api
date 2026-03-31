@@ -5723,7 +5723,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// Build effective drop set: merge static defaults with dynamic beta policy filter rules
 	policyFilterSet := s.getBetaPolicyFilterSet(ctx, c, account)
 	effectiveDropSet := mergeDropSets(policyFilterSet)
-	effectiveDropWithClaudeCodeSet := mergeDropSets(policyFilterSet, claude.BetaClaudeCode)
 
 	// 处理 anthropic-beta header（OAuth 账号需要包含 oauth beta）
 	if tokenType == "oauth" {
@@ -5734,11 +5733,11 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			applyClaudeCodeMimicHeaders(req, reqStream)
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
-			// Match real Claude CLI traffic (per mitmproxy reports):
-			// messages requests typically use only oauth + interleaved-thinking.
-			// Also drop claude-code beta if a downstream client added it.
-			requiredBetas := []string{claude.BetaOAuth, claude.BetaInterleavedThinking}
-			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropWithClaudeCodeSet))
+			// Match real Claude CLI 2.1.88 traffic:
+			// messages requests must include claude-code + oauth + interleaved-thinking + token-efficient-tools.
+			// claude-code-20250219 is REQUIRED for Claude Code-scoped OAuth credentials.
+			requiredBetas := []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking, claude.BetaTokenEfficientTools}
+			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, effectiveDropSet))
 		} else {
 			// Claude Code 客户端：尽量透传原始 header，仅补齐 oauth beta
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
@@ -5765,6 +5764,19 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 			}
 		}
+	} else if mimicClaudeCode {
+		// mimic 模式下客户端不会发送此 header，但真实 Claude Code 每个请求都带。
+		// 优先从 body 的 metadata.user_id 中提取 session_id，否则生成一个新的。
+		var sessionID string
+		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
+			if parsed := ParseMetadataUserID(uid); parsed != nil {
+				sessionID = parsed.SessionID
+			}
+		}
+		if sessionID == "" {
+			sessionID = generateRandomUUID()
+		}
+		setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", sessionID)
 	}
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
@@ -6179,6 +6191,8 @@ func applyClaudeCodeMimicHeaders(req *http.Request, isStream bool) {
 	if isStream {
 		setHeaderRaw(req.Header, "x-stainless-helper-method", "stream")
 	}
+	// 真实 Claude Code 每个请求生成唯一 x-client-request-id (UUID v4)
+	setHeaderRaw(req.Header, "x-client-request-id", generateRandomUUID())
 }
 
 func truncateForLog(b []byte, maxBytes int) string {
@@ -8458,7 +8472,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 			applyClaudeCodeMimicHeaders(req, false)
 
 			incomingBeta := getHeaderRaw(req.Header, "anthropic-beta")
-			requiredBetas := []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking, claude.BetaTokenCounting}
+			requiredBetas := []string{claude.BetaClaudeCode, claude.BetaOAuth, claude.BetaInterleavedThinking, claude.BetaTokenCounting, claude.BetaTokenEfficientTools}
 			setHeaderRaw(req.Header, "anthropic-beta", mergeAnthropicBetaDropping(requiredBetas, incomingBeta, ctEffectiveDropSet))
 		} else {
 			clientBetaHeader := getHeaderRaw(req.Header, "anthropic-beta")
@@ -8493,6 +8507,18 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
 			}
 		}
+	} else if mimicClaudeCode {
+		// mimic 模式下注入 X-Claude-Code-Session-Id（与 buildUpstreamRequest 保持一致）
+		var sessionID string
+		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
+			if parsed := ParseMetadataUserID(uid); parsed != nil {
+				sessionID = parsed.SessionID
+			}
+		}
+		if sessionID == "" {
+			sessionID = generateRandomUUID()
+		}
+		setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", sessionID)
 	}
 
 	if c != nil && tokenType == "oauth" {
