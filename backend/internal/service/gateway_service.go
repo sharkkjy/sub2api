@@ -4166,21 +4166,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			body = injectClaudeCodePrompt(body, parsed.System)
 		}
 
-		// 注入 x-anthropic-billing-header 到 system prompt（仅当 body 中尚无 billing header 时）
-		// 真实 Claude Code 客户端在每个请求的 system prompt 第一个 block 中包含此归因信息。
-		// 使用指纹中的版本号（或默认版本）来计算 billing fingerprint。
-		if !systemHasBillingHeader(body) {
-			billingVersion := ExtractCLIVersion(claude.GetCurrentUserAgent())
-			if billingVersion == "" {
-				billingVersion = claude.GetCurrentCLIVersion()
-			}
-			body = injectBillingHeader(body, billingVersion)
-		}
-
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: true}
+		mimicFingerprintUA := "" // 用于 billing header 的版本来源
 		if s.identityService != nil {
 			fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)
 			if err == nil && fp != nil {
+				mimicFingerprintUA = fp.UserAgent
 				// metadata 透传开启时跳过 metadata 注入
 				_, mimicMPT := s.settingService.GetGatewayForwardingSettings(ctx)
 				if !mimicMPT {
@@ -4193,6 +4184,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 
 		body, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
+
+		// 注入 billing header — 使用 per-account 指纹中的版本号，确保与 User-Agent 一致
+		body = ensureBillingHeader(body, mimicFingerprintUA)
 	}
 
 	// 强制执行 cache_control 块数量限制（最多 4 个）

@@ -206,43 +206,25 @@ func getGroupPlatform(c *gin.Context) string {
 // registerTelemetrySinkRoutes 注册遥测/元数据路径的拦截路由。
 //
 // 真实 Claude Code 客户端在设置 ANTHROPIC_BASE_URL 后会将以下请求发往同一 base URL：
-//   - POST /api/event_logging/batch — 1P 遥测事件（device_id、email、env 环境指纹、进程指标等）
+//   - POST /api/event_logging/batch — 1P 遥测事件
 //   - GET  /api/claude_code/policy_limits — 策略限制查询
 //   - GET  /api/claude_cli/bootstrap — 启动引导数据
-//   - GET  /api/claude_cli_profile — CLI 配置文件
-//   - GET  /api/oauth/profile — OAuth 用户信息
-//   - GET  /api/oauth/usage — 使用量查询
-//   - GET  /api/oauth/account/settings — 账户设置
+//   - GET  /api/oauth/* — 各种 OAuth 相关查询
+//   - 以及未来可能新增的 /api/* 路径
 //
-// 这些路径包含大量真实身份信息，如果透传给上游会暴露代理存在。
-// 我们返回合理的空响应，使客户端认为请求成功，不会触发报错或重试。
+// 使用通配符 /api/* 拦截所有 /api/ 开头的请求，返回 200 OK。
+// 这样无需逐条枚举路径，也不怕 Claude Code 更新后新增路径导致 404。
+//
+// 注意：这些路由不需要经过 API Key 认证中间件，因为它们只是静默丢弃请求。
 func registerTelemetrySinkRoutes(r *gin.Engine) {
-	// 遥测事件批量上报 — 最重要的拦截点
-	// Claude Code 每 5 秒或 200 条事件触发一次，包含 911+ 种事件类型
-	r.POST("/api/event_logging/batch", func(c *gin.Context) {
+	sink := func(c *gin.Context) {
 		// 读完 body 再丢弃，避免客户端收到 connection reset
 		_, _ = c.GetRawData()
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	// Claude Code 配置/策略相关路径 — 返回空但合法的 JSON
-	sinkPaths := []string{
-		"/api/claude_code/policy_limits",
-		"/api/claude_cli/bootstrap",
-		"/api/claude_cli_profile",
-		"/api/oauth/profile",
-		"/api/oauth/usage",
-		"/api/oauth/account/settings",
+		c.JSON(http.StatusOK, gin.H{})
 	}
-	for _, path := range sinkPaths {
-		p := path // capture for closure
-		r.GET(p, func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{})
-		})
-		// 某些路径可能也接受 POST
-		r.POST(p, func(c *gin.Context) {
-			_, _ = c.GetRawData()
-			c.JSON(http.StatusOK, gin.H{})
-		})
-	}
+	r.GET("/api/*path", sink)
+	r.POST("/api/*path", sink)
+	r.PUT("/api/*path", sink)
+	r.PATCH("/api/*path", sink)
+	r.DELETE("/api/*path", sink)
 }

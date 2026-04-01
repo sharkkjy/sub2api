@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
 )
@@ -23,10 +24,13 @@ const billingFingerprintSalt = "59cf53e54c78"
 // This matches the implementation in claude-code src/utils/fingerprint.ts:computeFingerprint
 func computeBillingFingerprint(firstMessageText, version string) string {
 	indices := []int{4, 7, 20}
+	runes := []rune(firstMessageText)
 	var chars strings.Builder
 	for _, i := range indices {
-		if i < len(firstMessageText) {
-			chars.WriteByte(firstMessageText[i])
+		if i < len(runes) {
+			// Use rune indexing to match JavaScript's string[i] behavior (UTF-16 code unit).
+			// For BMP characters (all common text), rune index == UTF-16 code unit index.
+			chars.WriteRune(runes[i])
 		} else {
 			chars.WriteByte('0')
 		}
@@ -171,4 +175,19 @@ func systemHasBillingHeader(body []byte) bool {
 		return hasBilling
 	}
 	return false
+}
+
+// ensureBillingHeader injects the billing header into the body if not already present.
+// Uses fingerprintUA to extract the CLI version; falls back to the global current version.
+// This is the single entry point used by all forwarding paths (Forward, ForwardAsChatCompletions,
+// ForwardAsResponses) to avoid code duplication.
+func ensureBillingHeader(body []byte, fingerprintUA string) []byte {
+	if systemHasBillingHeader(body) {
+		return body
+	}
+	billingVersion := ExtractCLIVersion(fingerprintUA)
+	if billingVersion == "" {
+		billingVersion = claude.GetCurrentCLIVersion()
+	}
+	return injectBillingHeader(body, billingVersion)
 }

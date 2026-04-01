@@ -70,12 +70,16 @@ func (vs *VersionSyncer) Start() {
 // Stop halts the periodic sync.
 func (vs *VersionSyncer) Stop() {
 	vs.mu.Lock()
-	defer vs.mu.Unlock()
+	cancel := vs.cancel
+	done := vs.done
+	vs.mu.Unlock()
 
-	if vs.cancel != nil {
-		vs.cancel()
-		<-vs.done
+	if cancel != nil {
+		cancel()
+		<-done
+		vs.mu.Lock()
 		vs.cancel = nil
+		vs.mu.Unlock()
 	}
 }
 
@@ -101,18 +105,18 @@ func (vs *VersionSyncer) run(ctx context.Context) {
 func (vs *VersionSyncer) syncOnce(ctx context.Context) {
 	cliVersion, err := vs.fetchNPMVersion(ctx, "@anthropic-ai/claude-code")
 	if err != nil {
-		// Silently continue with current version
 		return
 	}
 
 	sdkVersion, err := vs.fetchNPMVersion(ctx, "@anthropic-ai/sdk")
 	if err != nil {
-		// Still update CLI version even if SDK fetch fails
-		sdkVersion = ""
+		// CLI and SDK versions should be updated together to avoid version skew.
+		// A new CLI version paired with a stale SDK version is unrealistic.
+		return
 	}
 
 	// Only update if we got valid semver-like versions
-	if cliVersion != "" && isSemver(cliVersion) {
+	if cliVersion != "" && isSemver(cliVersion) && sdkVersion != "" && isSemver(sdkVersion) {
 		oldCLI := GetCurrentCLIVersion()
 		oldSDK := GetCurrentSDKVersion()
 

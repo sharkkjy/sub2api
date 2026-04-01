@@ -94,14 +94,8 @@ func (s *GatewayService) ForwardAsChatCompletions(
 			!systemIncludesClaudeCodePrompt(anthropicReq.System) {
 			anthropicBody = injectClaudeCodePrompt(anthropicBody, anthropicReq.System)
 		}
-		// 注入 x-anthropic-billing-header 到 system prompt
-		if !systemHasBillingHeader(anthropicBody) {
-			billingVersion := ExtractCLIVersion(claude.GetCurrentUserAgent())
-			if billingVersion == "" {
-				billingVersion = claude.GetCurrentCLIVersion()
-			}
-			anthropicBody = injectBillingHeader(anthropicBody, billingVersion)
-		}
+		// 注入 billing header（这条路径没有 fingerprint，使用全局版本）
+		anthropicBody = ensureBillingHeader(anthropicBody, claude.GetCurrentUserAgent())
 	}
 
 	// 7. Enforce cache_control block limit

@@ -12,10 +12,13 @@ import (
 //
 // This is NOT a rate limiter — it's a pattern normalizer. It only adds delay
 // when requests come faster than minInterval (suggesting automated usage).
+//
+// Starts an internal cleanup goroutine. Call Stop() to release resources.
 type RequestPacer struct {
 	mu          sync.Mutex
 	lastRequest map[int64]time.Time // accountID -> last request time
 	rng         *rand.Rand
+	stopCh      chan struct{}
 
 	// minInterval is the minimum time between requests before pacing kicks in.
 	// Requests slower than this pass through without delay.
@@ -25,15 +28,42 @@ type RequestPacer struct {
 	maxJitter time.Duration
 }
 
-// NewRequestPacer creates a new RequestPacer.
+// NewRequestPacer creates a new RequestPacer and starts a background cleanup goroutine.
 // minInterval: requests faster than this get paced (recommended: 1-2s)
 // maxJitter: maximum random delay added (recommended: 2-4s)
 func NewRequestPacer(minInterval, maxJitter time.Duration) *RequestPacer {
-	return &RequestPacer{
+	p := &RequestPacer{
 		lastRequest: make(map[int64]time.Time, 64),
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 		minInterval: minInterval,
 		maxJitter:   maxJitter,
+		stopCh:      make(chan struct{}),
+	}
+	go p.cleanupLoop()
+	return p
+}
+
+// Stop halts the background cleanup goroutine.
+func (p *RequestPacer) Stop() {
+	select {
+	case <-p.stopCh:
+		// already stopped
+	default:
+		close(p.stopCh)
+	}
+}
+
+// cleanupLoop periodically removes stale entries to prevent unbounded map growth.
+func (p *RequestPacer) cleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.cleanup(10 * time.Minute)
+		}
 	}
 }
 
@@ -62,9 +92,8 @@ func (p *RequestPacer) GetDelay(accountID int64) time.Duration {
 	return remaining + jitter
 }
 
-// Cleanup removes stale entries older than maxAge.
-// Should be called periodically (e.g., every 5 minutes).
-func (p *RequestPacer) Cleanup(maxAge time.Duration) {
+// cleanup removes stale entries older than maxAge.
+func (p *RequestPacer) cleanup(maxAge time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
